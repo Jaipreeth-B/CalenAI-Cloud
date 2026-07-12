@@ -710,20 +710,37 @@ func callCerebrasWithTools(messages []ChatMessagePayload, depth int) (string, er
 }
 
 func parseFlexibleDate(s string) (time.Time, error) {
-	formats := []string{
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to load timezone: %w", err)
+	}
+
+	// Formats that already contain timezone information.
+	timezoneFormats := []string{
 		time.RFC3339,
 		"2006-01-02T15:04:05Z07:00",
+	}
+
+	for _, f := range timezoneFormats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, nil
+		}
+	}
+
+	// Formats without timezone information.
+	// Treat them as Asia/Kolkata instead of UTC.
+	localFormats := []string{
 		"2006-01-02T15:04:05",
 		"2006-01-02 15:04:05",
 		"2006-01-02",
 	}
-	for _, f := range formats {
-		if t, err := time.Parse(f, s); err == nil {
-			// Force the parsed clock time into the Local timezone
-			// This prevents AI-generated 'Z' suffixes from shifting the time by +5:30 etc.
-			return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.Local), nil
+
+	for _, f := range localFormats {
+		if t, err := time.ParseInLocation(f, s, loc); err == nil {
+			return t, nil
 		}
 	}
+
 	return time.Time{}, fmt.Errorf("invalid date format")
 }
 func applyTaskFilters(query *gorm.DB, args map[string]interface{}) *gorm.DB {
