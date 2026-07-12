@@ -7,7 +7,8 @@ backend/calenai.db
 backend/*.exe
 backend/*.test
 backend/bin/
-
+backend/.env
+backend/ToDo.md
 # Frontend
 frontend/node_modules/
 frontend/dist/
@@ -20,6 +21,7 @@ frontend/yarn-debug.log*
 frontend/yarn-error.log*
 frontend/pnpm-debug.log*
 frontend/lerna-debug.log*
+frontend/.env
 
 # Editor
 .vscode/

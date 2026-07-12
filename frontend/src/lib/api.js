@@ -9,8 +9,8 @@ export const isChatLoading = writable(false);
 // New store for the selected calendar date
 export const selectedDate = writable(new Date());
 
-const API_BASE = "http://localhost:9090/api";
-
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:9090/api";
+console.log(API_BASE);
 export async function fetchTasks() {
 	try {
 		const res = await fetch(`${API_BASE}/tasks`);
