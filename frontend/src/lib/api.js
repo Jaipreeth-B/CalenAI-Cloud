@@ -14,8 +14,8 @@ const DEFAULT_HEADERS = {
 	"X-Timezone": USER_TIMEZONE,
 };
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:9090/api";
-console.log(API_BASE);
-console.log(DEFAULT_HEADERS);
+//console.log(API_BASE);
+//console.log(DEFAULT_HEADERS);
 export async function fetchTasks() {
 	try {
 		const res = await fetch(`${API_BASE}/tasks`, { headers: DEFAULT_HEADERS });
@@ -80,7 +80,7 @@ export async function sendChatMessage(sessionId, message) {
 	isChatLoading.set(true);
 
 	try {
-		console.log("Headers being sent:", DEFAULT_HEADERS);
+		//console.log("Headers being sent:", DEFAULT_HEADERS);
 		const res = await fetch(`${API_BASE}/chat/${sessionId}`, {
 			method: "POST",
 			//headers: { "Content-Type": "application/json" },

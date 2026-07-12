@@ -51,10 +51,10 @@ type ChatMessage struct {
 var db *gorm.DB
 
 func getCurrentTime(c *gin.Context) time.Time {
-	log.Printf("All request headers: %+v", c.Request.Header)
+	//log.Printf("All request headers: %+v", c.Request.Header)
 
 	tz := c.GetHeader("X-Timezone")
-	log.Printf("Timezone header: %q", tz)
+	//log.Printf("Timezone header: %q", tz)
 	if tz == "" {
 		now := time.Now().UTC()
 		log.Printf("No timezone header. Using UTC: %s", now.Format(time.RFC3339))
@@ -70,12 +70,12 @@ func getCurrentTime(c *gin.Context) time.Time {
 
 	now := time.Now().In(loc)
 
-	log.Printf(
-		"Server UTC: %s | Client TZ: %s | Converted: %s",
-		time.Now().UTC().Format(time.RFC3339),
-		tz,
-		now.Format(time.RFC3339),
-	)
+	// log.Printf(
+	// 	"Server UTC: %s | Client TZ: %s | Converted: %s",
+	// 	time.Now().UTC().Format(time.RFC3339),
+	// 	tz,
+	// 	now.Format(time.RFC3339),
+	// )
 
 	return now
 }
@@ -99,7 +99,7 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using system environment variables.")
 	}
-	fmt.Println("API KEY:", os.Getenv("CEREBRAS_API_KEY"))
+	//fmt.Println("API KEY:", os.Getenv("CEREBRAS_API_KEY"))
 	initDB()
 
 	r := gin.Default()
@@ -349,6 +349,7 @@ func handleChat(c *gin.Context) {
 
 		now.Format("Monday, January 02, 2006"),
 		now.Format("15:04"),
+		now.Format("03:04 PM"),
 	)
 	var messages []ChatMessagePayload
 	messages = append(messages, ChatMessagePayload{Role: "system", Content: systemPrompt})
