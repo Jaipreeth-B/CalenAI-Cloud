@@ -222,24 +222,24 @@ type ChatRequest struct {
 type ChatMessagePayload struct {
 	Role       string             `json:"role"`
 	Content    string             `json:"content,omitempty"`
-	ToolCalls  []OllamaToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
+	ToolCalls  []OpenRouterToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string               `json:"tool_call_id,omitempty"`
 }
 
-// OLLAMA CLOUD/LOCAL AI STRUCT
-type OllamaResponse struct {
+// OPENROUTER CLOUD AI STRUCT
+type OpenRouterResponse struct {
 	Choices []struct {
-		Message OllamaMessage `json:"message"`
+		Message OpenRouterMessage `json:"message"`
 	} `json:"choices"`
 }
 
-type OllamaMessage struct {
-	Role      string           `json:"role"`
-	Content   *string          `json:"content"`
-	ToolCalls []OllamaToolCall `json:"tool_calls,omitempty"`
+type OpenRouterMessage struct {
+	Role      string               `json:"role"`
+	Content   *string              `json:"content"`
+	ToolCalls []OpenRouterToolCall `json:"tool_calls,omitempty"`
 }
 
-type OllamaToolCall struct {
+type OpenRouterToolCall struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 
@@ -358,9 +358,9 @@ func handleChat(c *gin.Context) {
 	}
 
 	// 2. Reasoning Loop (Multi-Think)
-	response, err := callOllamaWithTools(messages, 0)
+	response, err := callOpenRouterWithTools(messages, 0)
 	if err != nil {
-		log.Printf("Ollama error: %v", err)
+		log.Printf("OpenRouter error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI failure"})
 		return
 	}
@@ -376,11 +376,11 @@ const (
 	maxRetries   = 3
 )
 
-func callOllamaWithTools(messages []ChatMessagePayload, depth int) (string, error) {
-	apiKey := os.Getenv("OLLAMA_API_KEY")
-	url := os.Getenv("OLLAMA_BASE_URL")
+func callOpenRouterWithTools(messages []ChatMessagePayload, depth int) (string, error) {
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	url := os.Getenv("OPENROUTER_BASE_URL")
 	if url == "" {
-		url = "http://localhost:11434/v1/chat/completions"
+		url = "https://openrouter.ai/api/v1/chat/completions"
 	}
 	if depth >= maxToolCalls {
 		return "", fmt.Errorf("agent exceeded maximum tool calls (%d)", maxToolCalls)
@@ -542,9 +542,9 @@ func callOllamaWithTools(messages []ChatMessagePayload, depth int) (string, erro
 			},
 		},
 	}
-	model := os.Getenv("OLLAMA_MODEL")
+	model := os.Getenv("OPENROUTER_MODEL")
 	if model == "" {
-		model = "glm-5.3-flash"
+		model = "meta-llama/llama-3.1-8b-instruct"
 	}
 	payload := map[string]interface{}{
 		"model":    model,
@@ -578,6 +578,10 @@ func callOllamaWithTools(messages []ChatMessagePayload, depth int) (string, erro
 		if apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
+		// OpenRouter recommended headers
+		req.Header.Set("HTTP-Referer", "http://localhost:5173") 
+		req.Header.Set("X-Title", "CalenAI")
+
 		req.Header.Set("Content-Type", "application/json")
 		resp, err = client.Do(req)
 
@@ -590,7 +594,7 @@ func callOllamaWithTools(messages []ChatMessagePayload, depth int) (string, erro
 				resp.StatusCode == http.StatusGatewayTimeout {
 
 				log.Printf(
-					"Ollama returned HTTP %d (attempt %d/%d)",
+					"OpenRouter returned HTTP %d (attempt %d/%d)",
 					resp.StatusCode,
 					attempt,
 					maxRetries,
@@ -621,7 +625,7 @@ func callOllamaWithTools(messages []ChatMessagePayload, depth int) (string, erro
 		}
 
 		log.Printf(
-			"Ollama request failed (attempt %d/%d): %v",
+			"OpenRouter request failed (attempt %d/%d): %v",
 			attempt,
 			maxRetries,
 			err,
@@ -640,50 +644,50 @@ func callOllamaWithTools(messages []ChatMessagePayload, depth int) (string, erro
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read Ollama response body: %w", err)
+		return "", fmt.Errorf("failed to read OpenRouter response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		log.Printf(
-			"Ollama API Error (HTTP %d): %s",
+			"OpenRouter API Error (HTTP %d): %s",
 			resp.StatusCode,
 			string(body),
 		)
 
 		return "", fmt.Errorf(
-			"ollama returned HTTP %d: %s",
+			"openrouter returned HTTP %d: %s",
 			resp.StatusCode,
 			string(body),
 		)
 	}
-	var ollamaResp OllamaResponse
+	var openRouterResp OpenRouterResponse
 
-	if err := json.Unmarshal(body, &ollamaResp); err != nil {
-		return "", fmt.Errorf("failed to parse Ollama response: %w", err)
+	if err := json.Unmarshal(body, &openRouterResp); err != nil {
+		return "", fmt.Errorf("failed to parse OpenRouter response: %w", err)
 	}
 
-	if len(ollamaResp.Choices) == 0 {
-		return "", fmt.Errorf("no response returned from Ollama")
+	if len(openRouterResp.Choices) == 0 {
+		return "", fmt.Errorf("no response returned from OpenRouter")
 	}
 
-	if len(ollamaResp.Choices[0].Message.ToolCalls) > 0 {
+	if len(openRouterResp.Choices[0].Message.ToolCalls) > 0 {
 
 		content := ""
-		if ollamaResp.Choices[0].Message.Content != nil {
-			content = *ollamaResp.Choices[0].Message.Content
+		if openRouterResp.Choices[0].Message.Content != nil {
+			content = *openRouterResp.Choices[0].Message.Content
 		}
 
 		assistantMessage := ChatMessagePayload{
-			Role:    ollamaResp.Choices[0].Message.Role,
+			Role:    openRouterResp.Choices[0].Message.Role,
 			Content: content,
 		}
 		// Preserve assistant tool calls before executing them.
-		assistantMessage.ToolCalls = ollamaResp.Choices[0].Message.ToolCalls
+		assistantMessage.ToolCalls = openRouterResp.Choices[0].Message.ToolCalls
 
 		// Assistant message MUST come before tool responses.
 		messages = append(messages, assistantMessage)
 
 		// Execute tool calls.
-		for _, tc := range ollamaResp.Choices[0].Message.ToolCalls {
+		for _, tc := range openRouterResp.Choices[0].Message.ToolCalls {
 
 			log.Printf("AI thinking... Executing tool: %s", tc.Function.Name)
 			log.Printf("Raw tool arguments: %s", tc.Function.Arguments)
@@ -700,12 +704,12 @@ func callOllamaWithTools(messages []ChatMessagePayload, depth int) (string, erro
 			})
 		}
 
-		return callOllamaWithTools(messages, depth+1)
+		return callOpenRouterWithTools(messages, depth+1)
 	}
-	if ollamaResp.Choices[0].Message.Content == nil {
+	if openRouterResp.Choices[0].Message.Content == nil {
 		return "Done.", nil
 	}
-	return *ollamaResp.Choices[0].Message.Content, nil
+	return *openRouterResp.Choices[0].Message.Content, nil
 }
 
 func parseFlexibleDate(s string) (time.Time, error) {
@@ -766,7 +770,7 @@ func applyTaskFilters(query *gorm.DB, args map[string]interface{}) *gorm.DB {
 
 	return query
 }
-func executeTool(tc OllamaToolCall) string {
+func executeTool(tc OpenRouterToolCall) string {
 	var args map[string]interface{}
 
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
