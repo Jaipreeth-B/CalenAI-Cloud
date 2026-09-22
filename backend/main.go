@@ -222,24 +222,24 @@ type ChatRequest struct {
 type ChatMessagePayload struct {
 	Role       string             `json:"role"`
 	Content    string             `json:"content,omitempty"`
-	ToolCalls  []CerebrasToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string             `json:"tool_call_id,omitempty"`
+	ToolCalls  []OllamaToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
-// CEREBRAS CLOUD AI STRUCT
-type CerebrasResponse struct {
+// OLLAMA CLOUD/LOCAL AI STRUCT
+type OllamaResponse struct {
 	Choices []struct {
-		Message CerebrasMessage `json:"message"`
+		Message OllamaMessage `json:"message"`
 	} `json:"choices"`
 }
 
-type CerebrasMessage struct {
-	Role      string             `json:"role"`
-	Content   *string            `json:"content"`
-	ToolCalls []CerebrasToolCall `json:"tool_calls,omitempty"`
+type OllamaMessage struct {
+	Role      string           `json:"role"`
+	Content   *string          `json:"content"`
+	ToolCalls []OllamaToolCall `json:"tool_calls,omitempty"`
 }
 
-type CerebrasToolCall struct {
+type OllamaToolCall struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 
@@ -358,9 +358,9 @@ func handleChat(c *gin.Context) {
 	}
 
 	// 2. Reasoning Loop (Multi-Think)
-	response, err := callCerebrasWithTools(messages, 0)
+	response, err := callOllamaWithTools(messages, 0)
 	if err != nil {
-		log.Printf("Cerebras error: %v", err)
+		log.Printf("Ollama error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI failure"})
 		return
 	}
@@ -376,14 +376,11 @@ const (
 	maxRetries   = 3
 )
 
-func callCerebrasWithTools(messages []ChatMessagePayload, depth int) (string, error) {
-	apiKey := os.Getenv("CEREBRAS_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("CEREBRAS_API_KEY environment variable is not set")
-	}
-	url := os.Getenv("CEREBRAS_BASE_URL")
+func callOllamaWithTools(messages []ChatMessagePayload, depth int) (string, error) {
+	apiKey := os.Getenv("OLLAMA_API_KEY")
+	url := os.Getenv("OLLAMA_BASE_URL")
 	if url == "" {
-		url = "https://api.cerebras.ai/v1/chat/completions"
+		url = "http://localhost:11434/v1/chat/completions"
 	}
 	if depth >= maxToolCalls {
 		return "", fmt.Errorf("agent exceeded maximum tool calls (%d)", maxToolCalls)
@@ -545,9 +542,9 @@ func callCerebrasWithTools(messages []ChatMessagePayload, depth int) (string, er
 			},
 		},
 	}
-	model := os.Getenv("CEREBRAS_MODEL")
+	model := os.Getenv("OLLAMA_MODEL")
 	if model == "" {
-		model = "gpt-oss-120b"
+		model = "glm-5.3-flash"
 	}
 	payload := map[string]interface{}{
 		"model":    model,
@@ -578,7 +575,9 @@ func callCerebrasWithTools(messages []ChatMessagePayload, depth int) (string, er
 			return "", err
 		}
 
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err = client.Do(req)
 
@@ -591,7 +590,7 @@ func callCerebrasWithTools(messages []ChatMessagePayload, depth int) (string, er
 				resp.StatusCode == http.StatusGatewayTimeout {
 
 				log.Printf(
-					"Cerebras returned HTTP %d (attempt %d/%d)",
+					"Ollama returned HTTP %d (attempt %d/%d)",
 					resp.StatusCode,
 					attempt,
 					maxRetries,
@@ -622,7 +621,7 @@ func callCerebrasWithTools(messages []ChatMessagePayload, depth int) (string, er
 		}
 
 		log.Printf(
-			"Cerebras request failed (attempt %d/%d): %v",
+			"Ollama request failed (attempt %d/%d): %v",
 			attempt,
 			maxRetries,
 			err,
@@ -641,50 +640,50 @@ func callCerebrasWithTools(messages []ChatMessagePayload, depth int) (string, er
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read Cerebras response body: %w", err)
+		return "", fmt.Errorf("failed to read Ollama response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		log.Printf(
-			"Cerebras API Error (HTTP %d): %s",
+			"Ollama API Error (HTTP %d): %s",
 			resp.StatusCode,
 			string(body),
 		)
 
 		return "", fmt.Errorf(
-			"cerebras returned HTTP %d: %s",
+			"ollama returned HTTP %d: %s",
 			resp.StatusCode,
 			string(body),
 		)
 	}
-	var cerebrasResp CerebrasResponse
+	var ollamaResp OllamaResponse
 
-	if err := json.Unmarshal(body, &cerebrasResp); err != nil {
-		return "", fmt.Errorf("failed to parse Cerebras response: %w", err)
+	if err := json.Unmarshal(body, &ollamaResp); err != nil {
+		return "", fmt.Errorf("failed to parse Ollama response: %w", err)
 	}
 
-	if len(cerebrasResp.Choices) == 0 {
-		return "", fmt.Errorf("no response returned from Cerebras")
+	if len(ollamaResp.Choices) == 0 {
+		return "", fmt.Errorf("no response returned from Ollama")
 	}
 
-	if len(cerebrasResp.Choices[0].Message.ToolCalls) > 0 {
+	if len(ollamaResp.Choices[0].Message.ToolCalls) > 0 {
 
 		content := ""
-		if cerebrasResp.Choices[0].Message.Content != nil {
-			content = *cerebrasResp.Choices[0].Message.Content
+		if ollamaResp.Choices[0].Message.Content != nil {
+			content = *ollamaResp.Choices[0].Message.Content
 		}
 
 		assistantMessage := ChatMessagePayload{
-			Role:    cerebrasResp.Choices[0].Message.Role,
+			Role:    ollamaResp.Choices[0].Message.Role,
 			Content: content,
 		}
 		// Preserve assistant tool calls before executing them.
-		assistantMessage.ToolCalls = cerebrasResp.Choices[0].Message.ToolCalls
+		assistantMessage.ToolCalls = ollamaResp.Choices[0].Message.ToolCalls
 
 		// Assistant message MUST come before tool responses.
 		messages = append(messages, assistantMessage)
 
 		// Execute tool calls.
-		for _, tc := range cerebrasResp.Choices[0].Message.ToolCalls {
+		for _, tc := range ollamaResp.Choices[0].Message.ToolCalls {
 
 			log.Printf("AI thinking... Executing tool: %s", tc.Function.Name)
 			log.Printf("Raw tool arguments: %s", tc.Function.Arguments)
@@ -701,12 +700,12 @@ func callCerebrasWithTools(messages []ChatMessagePayload, depth int) (string, er
 			})
 		}
 
-		return callCerebrasWithTools(messages, depth+1)
+		return callOllamaWithTools(messages, depth+1)
 	}
-	if cerebrasResp.Choices[0].Message.Content == nil {
+	if ollamaResp.Choices[0].Message.Content == nil {
 		return "Done.", nil
 	}
-	return *cerebrasResp.Choices[0].Message.Content, nil
+	return *ollamaResp.Choices[0].Message.Content, nil
 }
 
 func parseFlexibleDate(s string) (time.Time, error) {
@@ -767,7 +766,7 @@ func applyTaskFilters(query *gorm.DB, args map[string]interface{}) *gorm.DB {
 
 	return query
 }
-func executeTool(tc CerebrasToolCall) string {
+func executeTool(tc OllamaToolCall) string {
 	var args map[string]interface{}
 
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
