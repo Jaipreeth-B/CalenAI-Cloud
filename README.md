@@ -10,7 +10,7 @@
 -  Fast Go + Gin REST API
 
 
-##Example ENV
+## Example ENV
 # OpenRouter configuration
 OPENROUTER_API_KEY=your_openrouter_api_key
 OPENROUTER_MODEL=meta-llama/llama-3.1-8b-instruct
@@ -21,3 +21,12 @@ PORT=9090
 
 # Database
 DATABASE_PATH=calenai.db
+
+# Execution
+## Frontend
+Go to the frontend directory and run the command:
+npm run dev
+Go to the backend directory and run the command:
+go run main.go
+
+Now in the website , give prompts to the AI bot to schedule your daily tasks.
