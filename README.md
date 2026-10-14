@@ -10,8 +10,8 @@
 -  Fast Go + Gin REST API
 
 
-## Example ENV
-# OpenRouter configuration
+# Example ENV
+## OpenRouter configuration
 OPENROUTER_API_KEY=your_openrouter_api_key
 OPENROUTER_MODEL=meta-llama/llama-3.1-8b-instruct
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1/chat/completions
