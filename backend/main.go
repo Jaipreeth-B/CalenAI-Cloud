@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -108,8 +110,38 @@ func getTimezoneFromIP(ipStr string) string {
 	return ""
 }
 
-// resolveTimezone determines the client's timezone by checking IP geolocation first, then X-Timezone header, falling back to UTC
+// resolveTimezone determines the client's timezone:
+// 1. Checks X-Timezone header (e.g. "Asia/Kolkata") against embedded IANA tzdata
+// 2. Checks X-Timezone-Offset header (minutes offset from UTC, e.g. "-330" for IST) via time.FixedZone
+// 3. Falls back to IP Geolocation if headers are missing
+// 4. Defaults to UTC
 func resolveTimezone(c *gin.Context) (string, *time.Location) {
+	// 1. Browser IANA timezone (embedded tzdata ensures this works in any container environment)
+	if headerTZ := c.GetHeader("X-Timezone"); headerTZ != "" && headerTZ != "UTC" {
+		if loc, err := time.LoadLocation(headerTZ); err == nil {
+			return headerTZ, loc
+		}
+	}
+
+	// 2. Browser exact UTC offset in minutes (from JS new Date().getTimezoneOffset())
+	if offsetStr := c.GetHeader("X-Timezone-Offset"); offsetStr != "" {
+		if offsetMinutes, err := strconv.Atoi(offsetStr); err == nil {
+			// JS getTimezoneOffset() is minutes UTC - Local, so negate to get seconds east of UTC
+			seconds := -offsetMinutes * 60
+			tzName := c.GetHeader("X-Timezone")
+			if tzName == "" || tzName == "UTC" {
+				sign := "+"
+				if seconds < 0 {
+					sign = "-"
+				}
+				absSec := int(math.Abs(float64(seconds)))
+				tzName = fmt.Sprintf("GMT%s%02d:%02d", sign, absSec/3600, (absSec%3600)/60)
+			}
+			return tzName, time.FixedZone(tzName, seconds)
+		}
+	}
+
+	// 3. Fallback to client IP geolocation
 	clientIP := getClientIP(c)
 	if ipTZ := getTimezoneFromIP(clientIP); ipTZ != "" {
 		if loc, err := time.LoadLocation(ipTZ); err == nil {
@@ -117,12 +149,7 @@ func resolveTimezone(c *gin.Context) (string, *time.Location) {
 		}
 	}
 
-	if headerTZ := c.GetHeader("X-Timezone"); headerTZ != "" {
-		if loc, err := time.LoadLocation(headerTZ); err == nil {
-			return headerTZ, loc
-		}
-	}
-
+	// 4. Default UTC
 	return "UTC", time.UTC
 }
 
@@ -213,9 +240,18 @@ func main() {
 	r.SetTrustedProxies(nil)
 
 	r.Use(cors.New(cors.Config{
+		AllowOriginFunc: func(origin string) bool {
+			if strings.HasSuffix(origin, ".vercel.app") ||
+				strings.HasPrefix(origin, "http://localhost:") ||
+				strings.HasPrefix(origin, "http://127.0.0.1:") ||
+				origin == "https://calen-ai-cloud.vercel.app" {
+				return true
+			}
+			return false
+		},
 		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:4173", "http://127.0.0.1:5173", "http://127.0.0.1:4173", "https://calen-ai-cloud.vercel.app"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "X-Timezone", "X-Client-Time"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "X-Timezone", "X-Timezone-Offset", "X-Client-Time"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
@@ -541,6 +577,7 @@ func handleChat(c *gin.Context) {
 		history[i], history[j] = history[j], history[i]
 	}
 	now := getCurrentTime(c)
+	tz, _ := resolveTimezone(c)
 	systemPrompt := fmt.Sprintf(
 		"You are CalenAI, a friendly, sophisticated AI calendar and task management assistant. "+
 			"You can converse naturally, answer general questions, and greet the user — not only manage tasks. "+
@@ -553,6 +590,7 @@ func handleChat(c *gin.Context) {
 			"Current Date: %s. "+
 			"Current Time (24-hour): %s. "+
 			"Current Time (12-hour): %s. "+
+			"User Timezone: %s. "+
 			"You MUST treat these values as the single source of truth. "+
 			"Never use your own knowledge, memory, training data, or assumptions for the current date or current time. "+
 			"If the user asks for the current date, current time, today's date, today's day, or similar questions, ALWAYS answer using the Current Date and Current Time provided above exactly. "+
@@ -656,6 +694,7 @@ func handleChat(c *gin.Context) {
 		now.Format("Monday, January 02, 2006"),
 		now.Format("15:04"),
 		now.Format("03:04 PM"),
+		tz,
 	)
 	var messages []ChatMessagePayload
 	messages = append(messages, ChatMessagePayload{Role: "system", Content: systemPrompt})
@@ -664,7 +703,6 @@ func handleChat(c *gin.Context) {
 	}
 
 	// 2. Reasoning Loop (Multi-Think)
-	tz, _ := resolveTimezone(c)
 	response, err := callOpenRouterWithTools(messages, 0, tz, now)
 	if err != nil {
 		log.Printf("OpenRouter error: %v", err)

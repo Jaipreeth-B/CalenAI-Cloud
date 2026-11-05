@@ -12,6 +12,7 @@ export function getHeaders() {
 	return {
 		"Content-Type": "application/json",
 		"X-Timezone": Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+		"X-Timezone-Offset": String(new Date().getTimezoneOffset()),
 		"X-Client-Time": new Date().toISOString(),
 	};
 }
