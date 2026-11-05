@@ -14,18 +14,18 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
-	"gorm.io/driver/postgres"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 type Task struct {
 	ID            uint           `gorm:"primaryKey" json:"id"`
-	Title         string         `gorm:"uniqueIndex:idx_task_unique" json:"title"`
+	Title         string         `json:"title"`
 	Desc          string         `json:"desc"`
 	IsCompleted   bool           `json:"is_completed"`
-	StartDateTime *time.Time     `gorm:"uniqueIndex:idx_task_unique" json:"start_date_time"`
+	StartDateTime *time.Time     `json:"start_date_time"`
 	EndDateTime   *time.Time     `json:"end_date_time"`
 	CreatedAt     time.Time      `json:"created_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`
@@ -101,16 +101,44 @@ func initDB() {
 	if err := db.AutoMigrate(&Task{}, &Session{}, &ChatMessage{}); err != nil {
 		log.Fatalf("failed to auto-migrate database schema: %v", err)
 	}
+
+	// The old unique index also counted soft-deleted rows. Drop it and
+	// replace it with one that only applies to active (non-deleted) tasks.
+	if db.Migrator().HasIndex(&Task{}, "idx_task_unique") {
+		if err := db.Migrator().DropIndex(&Task{}, "idx_task_unique"); err != nil {
+			log.Printf("warning: could not drop old index idx_task_unique: %v", err)
+		}
+	}
+	if err := db.Exec(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_task_unique_active ON tasks (title, start_date_time) WHERE deleted_at IS NULL`,
+	).Error; err != nil {
+		log.Printf("warning: could not create idx_task_unique_active (existing duplicate tasks?): %v", err)
+	}
+}
+
+// taskExists reports whether an active (non-deleted) task with the same
+// title and start time already exists.
+func taskExists(title string, start *time.Time) bool {
+	if start == nil {
+		return false
+	}
+	var count int64
+	db.Model(&Task{}).Where("title = ? AND start_date_time = ?", title, *start).Count(&count)
+	return count > 0
 }
 
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using system environment variables.")
 	}
-	//fmt.Println("API KEY:", os.Getenv("CEREBRAS_API_KEY"))
 	initDB()
 
-	gin.SetMode(gin.ReleaseMode)
+	switch mode := os.Getenv("GIN_MODE"); mode {
+	case gin.DebugMode, gin.TestMode:
+		gin.SetMode(mode)
+	default:
+		gin.SetMode(gin.ReleaseMode)
+	}
 	r := gin.Default()
 	r.SetTrustedProxies(nil)
 
@@ -191,7 +219,11 @@ type TaskRequest struct {
 
 func getTasks(c *gin.Context) {
 	var tasks []Task
-	db.Find(&tasks)
+	if err := db.Find(&tasks).Error; err != nil {
+		log.Printf("getTasks: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load tasks"})
+		return
+	}
 	c.JSON(http.StatusOK, tasks)
 }
 
@@ -214,19 +246,42 @@ func createTask(c *gin.Context) {
 		task.IsCompleted = *req.IsCompleted
 	}
 	if req.StartDateTime != "" {
-		if t, err := parseFlexibleDate(req.StartDateTime, tz); err == nil {
-			task.StartDateTime = &t
-		} else {
+		t, err := parseFlexibleDate(req.StartDateTime, tz)
+		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid start_date_time: " + err.Error()})
 			return
 		}
+		task.StartDateTime = &t
 	}
 	if req.EndDateTime != "" {
-		if t, err := parseFlexibleDate(req.EndDateTime, tz); err == nil {
-			task.EndDateTime = &t
+		t, err := parseFlexibleDate(req.EndDateTime, tz)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid end_date_time: " + err.Error()})
+			return
 		}
+		task.EndDateTime = &t
 	}
-	db.Create(&task)
+
+	// Default the end time to start + 1 hour (same as the AI tools) so that
+	// overlap detection also covers tasks created from the UI.
+	if task.StartDateTime != nil && task.EndDateTime == nil {
+		defaultEnd := task.StartDateTime.Add(time.Hour)
+		task.EndDateTime = &defaultEnd
+	}
+	if task.StartDateTime != nil && task.EndDateTime != nil && !task.EndDateTime.After(*task.StartDateTime) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "end_date_time must be after start_date_time"})
+		return
+	}
+
+	if taskExists(task.Title, task.StartDateTime) {
+		c.JSON(http.StatusConflict, gin.H{"error": "A task with this title and start time already exists"})
+		return
+	}
+	if err := db.Create(&task).Error; err != nil {
+		log.Printf("createTask: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task"})
+		return
+	}
 	c.JSON(http.StatusCreated, task)
 }
 
@@ -235,9 +290,13 @@ func updateTask(c *gin.Context) {
 	if tz == "" {
 		tz = "UTC"
 	}
-	id := c.Param("id")
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task id"})
+		return
+	}
 	var task Task
-	if err := db.First(&task, id).Error; err != nil {
+	if err := db.First(&task, uint(id)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
 		return
 	}
@@ -256,22 +315,54 @@ func updateTask(c *gin.Context) {
 		task.IsCompleted = *req.IsCompleted
 	}
 	if req.StartDateTime != "" {
-		if t, err := parseFlexibleDate(req.StartDateTime, tz); err == nil {
-			task.StartDateTime = &t
+		t, err := parseFlexibleDate(req.StartDateTime, tz)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid start_date_time: " + err.Error()})
+			return
 		}
+		// Keep the original duration when only the start time changes.
+		if req.EndDateTime == "" && task.StartDateTime != nil && task.EndDateTime != nil {
+			newEnd := t.Add(task.EndDateTime.Sub(*task.StartDateTime))
+			task.EndDateTime = &newEnd
+		}
+		task.StartDateTime = &t
 	}
 	if req.EndDateTime != "" {
-		if t, err := parseFlexibleDate(req.EndDateTime, tz); err == nil {
-			task.EndDateTime = &t
+		t, err := parseFlexibleDate(req.EndDateTime, tz)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid end_date_time: " + err.Error()})
+			return
 		}
+		task.EndDateTime = &t
 	}
-	db.Save(&task)
+	if task.StartDateTime != nil && task.EndDateTime != nil && !task.EndDateTime.After(*task.StartDateTime) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "end_date_time must be after start_date_time"})
+		return
+	}
+	if err := db.Save(&task).Error; err != nil {
+		log.Printf("updateTask: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+		return
+	}
 	c.JSON(http.StatusOK, task)
 }
 
 func deleteTask(c *gin.Context) {
-	id := c.Param("id")
-	db.Delete(&Task{}, id)
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task id"})
+		return
+	}
+	var task Task
+	if err := db.First(&task, uint(id)).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+	if err := db.Delete(&task).Error; err != nil {
+		log.Printf("deleteTask: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete task"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"message": "Task deleted"})
 }
 
@@ -279,7 +370,11 @@ func deleteTask(c *gin.Context) {
 
 func getSessions(c *gin.Context) {
 	var sessions []Session
-	db.Order("created_at desc").Find(&sessions)
+	if err := db.Order("created_at desc").Find(&sessions).Error; err != nil {
+		log.Printf("getSessions: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load sessions"})
+		return
+	}
 	c.JSON(http.StatusOK, sessions)
 }
 
@@ -288,21 +383,38 @@ func createSession(c *gin.Context) {
 		ID:    uuid.New().String(),
 		Title: "New Chat " + time.Now().Format("Jan 02, 15:04"),
 	}
-	db.Create(&session)
+	if err := db.Create(&session).Error; err != nil {
+		log.Printf("createSession: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
+		return
+	}
 	c.JSON(http.StatusCreated, session)
 }
 
 func getSessionMessages(c *gin.Context) {
 	sessionID := c.Param("id")
 	var messages []ChatMessage
-	db.Where("session_id = ?", sessionID).Order("created_at asc").Find(&messages)
+	if err := db.Where("session_id = ?", sessionID).Order("created_at asc").Find(&messages).Error; err != nil {
+		log.Printf("getSessionMessages: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load messages"})
+		return
+	}
 	c.JSON(http.StatusOK, messages)
 }
 
 func deleteSession(c *gin.Context) {
 	sessionID := c.Param("id")
-	db.Where("session_id = ?", sessionID).Delete(&ChatMessage{})
-	db.Delete(&Session{}, "id = ?", sessionID)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("session_id = ?", sessionID).Delete(&ChatMessage{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&Session{}, "id = ?", sessionID).Error
+	})
+	if err != nil {
+		log.Printf("deleteSession: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete session"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"message": "Session deleted"})
 }
 
@@ -351,7 +463,11 @@ func handleChat(c *gin.Context) {
 	}
 
 	// Persist User Message
-	db.Create(&ChatMessage{SessionID: sessionID, Role: "user", Content: req.Message})
+	if err := db.Create(&ChatMessage{SessionID: sessionID, Role: "user", Content: req.Message}).Error; err != nil {
+		log.Printf("failed to save user message: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save message"})
+		return
+	}
 
 	// 1. Context Preparation
 	var history []ChatMessage
@@ -470,7 +586,8 @@ func handleChat(c *gin.Context) {
 			// =====================================================
 			// OVERLAP POLICY
 			// =====================================================
-			"If the backend returns an OVERLAP_WARNING when you try to add a task, inform the user which tasks overlap and ask how they would like to proceed (keep both, cancel the new one, or reschedule).",
+			"If the backend returns an OVERLAP_WARNING when you try to add a task, inform the user which tasks overlap and ask how they would like to proceed (keep both, cancel the new one, or reschedule). "+
+			"If the user explicitly chooses to keep both, call the same tool again with force set to true. Never set force to true unless the user has explicitly confirmed it.",
 
 		now.Format("Monday, January 02, 2006"),
 		now.Format("15:04"),
@@ -487,7 +604,7 @@ func handleChat(c *gin.Context) {
 	if tz == "" {
 		tz = "UTC"
 	}
-	response, err := callOpenRouterWithTools(messages, 0, tz)
+	response, err := callOpenRouterWithTools(messages, 0, tz, now)
 	if err != nil {
 		log.Printf("OpenRouter error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI failure"})
@@ -495,7 +612,9 @@ func handleChat(c *gin.Context) {
 	}
 
 	// Persist Assistant Response
-	db.Create(&ChatMessage{SessionID: sessionID, Role: "assistant", Content: response})
+	if err := db.Create(&ChatMessage{SessionID: sessionID, Role: "assistant", Content: response}).Error; err != nil {
+		log.Printf("failed to save assistant message: %v", err)
+	}
 
 	c.JSON(http.StatusOK, gin.H{"response": response})
 }
@@ -505,7 +624,7 @@ const (
 	maxRetries   = 3
 )
 
-func callOpenRouterWithTools(messages []ChatMessagePayload, depth int, timezone string) (string, error) {
+func callOpenRouterWithTools(messages []ChatMessagePayload, depth int, timezone string, clientNow time.Time) (string, error) {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	url := os.Getenv("OPENROUTER_BASE_URL")
 	if url == "" {
@@ -537,6 +656,10 @@ func callOpenRouterWithTools(messages []ChatMessagePayload, depth int, timezone 
 							"type":        "string",
 							"description": "Optional. ISO8601 format (e.g., 2026-06-02T18:00:00). Provide only if the user explicitly specifies an end time or duration. Otherwise omit this field.",
 						},
+						"force": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Set to true ONLY after the user has explicitly confirmed they want to keep an overlapping task. Defaults to false.",
+						},
 					},
 					"required": []string{"title", "start_date_time"},
 				},
@@ -551,6 +674,10 @@ func callOpenRouterWithTools(messages []ChatMessagePayload, depth int, timezone 
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
+						"force": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Set to true ONLY after the user has explicitly confirmed they want to keep overlapping tasks. Defaults to false.",
+						},
 						"tasks": map[string]interface{}{
 							"type":        "array",
 							"description": "List of tasks to create.",
@@ -849,7 +976,7 @@ func callOpenRouterWithTools(messages []ChatMessagePayload, depth int, timezone 
 			log.Printf("Raw tool arguments: %s", tc.Function.Arguments)
 			log.Printf("Reasoning depth: %d", depth)
 
-			res := executeTool(tc, timezone)
+			res := executeTool(tc, timezone, clientNow)
 
 			log.Printf("Tool result: %s", res)
 
@@ -860,7 +987,7 @@ func callOpenRouterWithTools(messages []ChatMessagePayload, depth int, timezone 
 			})
 		}
 
-		return callOpenRouterWithTools(messages, depth+1, timezone)
+		return callOpenRouterWithTools(messages, depth+1, timezone, clientNow)
 	}
 	if openRouterResp.Choices[0].Message.Content == nil {
 		return "Done.", nil
@@ -940,7 +1067,7 @@ func applyTaskFilters(query *gorm.DB, args map[string]interface{}) *gorm.DB {
 
 	return query
 }
-func executeTool(tc OpenRouterToolCall, timezone string) string {
+func executeTool(tc OpenRouterToolCall, timezone string, clientNow time.Time) string {
 	var args map[string]interface{}
 
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
@@ -955,6 +1082,7 @@ func executeTool(tc OpenRouterToolCall, timezone string) string {
 		title, _ := args["title"].(string)
 		desc, _ := args["desc"].(string)
 		startStr, _ := args["start_date_time"].(string)
+		force, _ := args["force"].(bool)
 
 		if startStr == "" {
 			return "Error: start_date_time is required."
@@ -985,33 +1113,41 @@ func executeTool(tc OpenRouterToolCall, timezone string) string {
 			task.EndDateTime = &defaultEnd
 		}
 
-		// Check for overlapping tasks before inserting.
-		var overlapping []Task
-		db.Where(
-			"deleted_at IS NULL AND start_date_time < ? AND end_date_time > ?",
-			*task.EndDateTime,
-			tStart,
-		).Find(&overlapping)
-		if len(overlapping) > 0 {
-			names := ""
-			for i, t := range overlapping {
-				if i > 0 {
-					names += ", "
+		if taskExists(title, &tStart) {
+			return fmt.Sprintf("Error: A task named '%s' already exists at %s. No duplicate was created.",
+				title, tStart.Format("Jan 02, 15:04"))
+		}
+
+		// Check for overlapping tasks unless the user confirmed keeping both.
+		if !force {
+			var overlapping []Task
+			db.Where(
+				"deleted_at IS NULL AND start_date_time < ? AND end_date_time > ?",
+				*task.EndDateTime,
+				tStart,
+			).Find(&overlapping)
+			if len(overlapping) > 0 {
+				names := ""
+				for i, t := range overlapping {
+					if i > 0 {
+						names += ", "
+					}
+					names += fmt.Sprintf("'%s' (%s)", t.Title, t.StartDateTime.Format("Jan 02, 15:04"))
 				}
-				names += fmt.Sprintf("'%s' (%s)", t.Title, t.StartDateTime.Format("Jan 02, 15:04"))
+				return fmt.Sprintf("OVERLAP_WARNING: The new task '%s' (%s - %s) overlaps with: %s. Ask the user how to proceed. If they want to keep both, call add_task again with force set to true.",
+					title,
+					tStart.Format("Jan 02, 15:04"),
+					task.EndDateTime.Format("15:04"),
+					names,
+				)
 			}
-			return fmt.Sprintf("OVERLAP_WARNING: The new task '%s' (%s - %s) overlaps with: %s. Ask the user how to proceed.",
-				title,
-				tStart.Format("Jan 02, 15:04"),
-				task.EndDateTime.Format("15:04"),
-				names,
-			)
 		}
 
 		if err := db.Create(&task).Error; err != nil {
 			return fmt.Sprintf("Failed to create task: %v", err)
 		}
 		return fmt.Sprintf("Task '%s' added successfully for %s.", title, tStart.Format("Jan 02, 15:04"))
+
 	case "add_tasks", "create_tasks":
 		rawItems, ok := args["tasks"]
 		if !ok {
@@ -1021,9 +1157,11 @@ func executeTool(tc OpenRouterToolCall, timezone string) string {
 		if !ok {
 			return "Error: 'tasks' must be an array."
 		}
+		force, _ := args["force"].(bool)
 
 		created := 0
 		skipped := 0
+		duplicates := 0
 		var overlapMsgs []string
 
 		for _, raw := range items {
@@ -1051,20 +1189,27 @@ func executeTool(tc OpenRouterToolCall, timezone string) string {
 				}
 			}
 
-			// Overlap check
-			var overlapping []Task
-			db.Where("deleted_at IS NULL AND start_date_time < ? AND end_date_time > ?", *tEnd, tStart).Find(&overlapping)
-			if len(overlapping) > 0 {
-				names := ""
-				for i, t := range overlapping {
-					if i > 0 {
-						names += ", "
-					}
-					names += fmt.Sprintf("'%s' (%s)", t.Title, t.StartDateTime.Format("Jan 02, 15:04"))
-				}
-				overlapMsgs = append(overlapMsgs, fmt.Sprintf("'%s' at %s overlaps with %s", title, tStart.Format("Jan 02, 15:04"), names))
-				skipped++
+			if taskExists(title, &tStart) {
+				duplicates++
 				continue
+			}
+
+			// Overlap check (skipped when the user confirmed keeping both)
+			if !force {
+				var overlapping []Task
+				db.Where("deleted_at IS NULL AND start_date_time < ? AND end_date_time > ?", *tEnd, tStart).Find(&overlapping)
+				if len(overlapping) > 0 {
+					names := ""
+					for i, t := range overlapping {
+						if i > 0 {
+							names += ", "
+						}
+						names += fmt.Sprintf("'%s' (%s)", t.Title, t.StartDateTime.Format("Jan 02, 15:04"))
+					}
+					overlapMsgs = append(overlapMsgs, fmt.Sprintf("'%s' at %s overlaps with %s", title, tStart.Format("Jan 02, 15:04"), names))
+					skipped++
+					continue
+				}
 			}
 
 			task := Task{Title: title, Desc: desc, StartDateTime: &tStart, EndDateTime: tEnd}
@@ -1076,11 +1221,15 @@ func executeTool(tc OpenRouterToolCall, timezone string) string {
 		}
 
 		result := fmt.Sprintf("%d tasks created successfully.", created)
+		if duplicates > 0 {
+			result += fmt.Sprintf(" %d skipped because identical tasks already exist.", duplicates)
+		}
 		if skipped > 0 {
 			result += fmt.Sprintf(" %d skipped.", skipped)
 		}
 		if len(overlapMsgs) > 0 {
-			result += " OVERLAP_WARNING: " + fmt.Sprintf("%v", overlapMsgs)
+			result += " OVERLAP_WARNING: " + fmt.Sprintf("%v", overlapMsgs) +
+				". Ask the user how to proceed. If they want to keep the overlapping ones, call add_tasks again with force set to true for those tasks only."
 		}
 		return result
 
@@ -1168,13 +1317,16 @@ func executeTool(tc OpenRouterToolCall, timezone string) string {
 		log.Printf("AI successfully deleted task: %s (ID: %d)", task.Title, id)
 		return fmt.Sprintf("Successfully deleted task: %s", task.Title)
 	case "get_current_time":
-		loc := time.UTC
-		if timezone != "" {
-			if l, err := time.LoadLocation(timezone); err == nil {
-				loc = l
+		now := clientNow
+		if now.IsZero() {
+			loc := time.UTC
+			if timezone != "" {
+				if l, err := time.LoadLocation(timezone); err == nil {
+					loc = l
+				}
 			}
+			now = time.Now().In(loc)
 		}
-		now := time.Now().In(loc)
 		return fmt.Sprintf(
 			"Current date and time: %s | Date: %s | Time (24h): %s | Time (12h): %s | Day: %s",
 			now.Format(time.RFC3339),
@@ -1189,14 +1341,14 @@ func executeTool(tc OpenRouterToolCall, timezone string) string {
 }
 
 func getAIContext(c *gin.Context) {
-	var tasks []Task
-	db.Find(&tasks)
+	var taskCount int64
+	db.Model(&Task{}).Count(&taskCount)
 
 	now := getCurrentTime(c)
 
 	c.JSON(http.StatusOK, gin.H{
 		"current_time": now,
 		"day":          now.Format("Monday"),
-		"task_count":   len(tasks),
+		"task_count":   taskCount,
 	})
 }

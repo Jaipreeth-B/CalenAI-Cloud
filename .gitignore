@@ -9,6 +9,7 @@ backend/*.test
 backend/bin/
 backend/.env
 backend/ToDo.md
+backend/perf_test.go
 # Frontend
 frontend/node_modules/
 frontend/dist/
