@@ -6,16 +6,15 @@ export const currentSessionId = writable(null);
 export const chatHistory = writable([]);
 export const isChatLoading = writable(false);
 
-// New store for the selected calendar date
 export const selectedDate = writable(new Date());
+
 const USER_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const DEFAULT_HEADERS = {
 	"Content-Type": "application/json",
 	"X-Timezone": USER_TIMEZONE,
 };
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:9090/api";
-//console.log(API_BASE);
-//console.log(DEFAULT_HEADERS);
+
 export async function fetchTasks() {
 	try {
 		const res = await fetch(`${API_BASE}/tasks`, { headers: DEFAULT_HEADERS });
@@ -28,11 +27,10 @@ export async function fetchTasks() {
 
 export async function fetchSessions() {
 	try {
-		const res = await fetch(`${API_BASE}/sessions`, {headers: DEFAULT_HEADERS,});
+		const res = await fetch(`${API_BASE}/sessions`, { headers: DEFAULT_HEADERS });
 		const data = await res.json();
 		sessions.set(data);
 
-		// Auto-select the first session if none is selected, OR create one if empty
 		if (data.length > 0) {
 			currentSessionId.update((id) => id || data[0].id);
 		} else {
@@ -61,12 +59,24 @@ export async function createNewSession() {
 export async function fetchSessionMessages(sessionId) {
 	if (!sessionId) return;
 	try {
-		const res = await fetch(`${API_BASE}/sessions/${sessionId}`,{ headers: DEFAULT_HEADERS,});
+		const res = await fetch(`${API_BASE}/sessions/${sessionId}`, { headers: DEFAULT_HEADERS });
 		const data = await res.json();
 		chatHistory.set(data);
 	} catch (err) {
 		console.error("Failed to fetch messages:", err);
 	}
+}
+
+// Holds the active AbortController so the stop button can cancel the request.
+export const currentAbortController = writable(null);
+
+export function cancelChatMessage() {
+	const ctrl = get(currentAbortController);
+	if (ctrl) {
+		ctrl.abort();
+		currentAbortController.set(null);
+	}
+	isChatLoading.set(false);
 }
 
 export async function sendChatMessage(sessionId, message) {
@@ -79,13 +89,15 @@ export async function sendChatMessage(sessionId, message) {
 	]);
 	isChatLoading.set(true);
 
+	const ctrl = new AbortController();
+	currentAbortController.set(ctrl);
+
 	try {
-		//console.log("Headers being sent:", DEFAULT_HEADERS);
 		const res = await fetch(`${API_BASE}/chat/${sessionId}`, {
 			method: "POST",
-			//headers: { "Content-Type": "application/json" },
 			headers: DEFAULT_HEADERS,
 			body: JSON.stringify({ message }),
+			signal: ctrl.signal,
 		});
 		const data = await res.json();
 
@@ -98,17 +110,29 @@ export async function sendChatMessage(sessionId, message) {
 			},
 		]);
 	} catch (err) {
-		console.error("Chat failed:", err);
-		chatHistory.update((history) => [
-			...history,
-			{
-				id: Date.now() + Math.random(),
-				role: "assistant",
-				content: "Error: Connection failed.",
-			},
-		]);
+		if (err.name === "AbortError") {
+			chatHistory.update((history) => [
+				...history,
+				{
+					id: Date.now() + Math.random(),
+					role: "assistant",
+					content: "Response stopped.",
+				},
+			]);
+		} else {
+			console.error("Chat failed:", err);
+			chatHistory.update((history) => [
+				...history,
+				{
+					id: Date.now() + Math.random(),
+					role: "assistant",
+					content: "Error: Connection failed.",
+				},
+			]);
+		}
 	} finally {
 		isChatLoading.set(false);
+		currentAbortController.set(null);
 		await fetchTasks();
 	}
 }
@@ -117,7 +141,6 @@ export async function toggleTask(task) {
 	try {
 		const res = await fetch(`${API_BASE}/tasks/${task.id}`, {
 			method: "PUT",
-			//headers: { "Content-Type": "application/json" },
 			headers: DEFAULT_HEADERS,
 			body: JSON.stringify({
 				...task,
@@ -153,9 +176,7 @@ export async function deleteSession(id) {
 			currentSessionId.update((currentId) => {
 				if (currentId === id) {
 					const currentSessions = get(sessions);
-					return currentSessions.length > 0
-						? currentSessions[0].id
-						: null;
+					return currentSessions.length > 0 ? currentSessions[0].id : null;
 				}
 				return currentId;
 			});
