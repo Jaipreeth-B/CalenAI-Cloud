@@ -8,16 +8,18 @@ export const isChatLoading = writable(false);
 
 export const selectedDate = writable(new Date());
 
-const USER_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
-const DEFAULT_HEADERS = {
-	"Content-Type": "application/json",
-	"X-Timezone": USER_TIMEZONE,
-};
+export function getHeaders() {
+	return {
+		"Content-Type": "application/json",
+		"X-Timezone": Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+		"X-Client-Time": new Date().toISOString(),
+	};
+}
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:9090/api";
 
 export async function fetchTasks() {
 	try {
-		const res = await fetch(`${API_BASE}/tasks`, { headers: DEFAULT_HEADERS });
+		const res = await fetch(`${API_BASE}/tasks`, { headers: getHeaders() });
 		const data = await res.json();
 		tasks.set(data);
 	} catch (err) {
@@ -27,7 +29,7 @@ export async function fetchTasks() {
 
 export async function fetchSessions() {
 	try {
-		const res = await fetch(`${API_BASE}/sessions`, { headers: DEFAULT_HEADERS });
+		const res = await fetch(`${API_BASE}/sessions`, { headers: getHeaders() });
 		const data = await res.json();
 		sessions.set(data);
 
@@ -45,7 +47,7 @@ export async function createNewSession() {
 	try {
 		const res = await fetch(`${API_BASE}/sessions`, {
 			method: "POST",
-			headers: DEFAULT_HEADERS,
+			headers: getHeaders(),
 		});
 		const data = await res.json();
 		sessions.update((s) => [data, ...s]);
@@ -59,7 +61,7 @@ export async function createNewSession() {
 export async function fetchSessionMessages(sessionId) {
 	if (!sessionId) return;
 	try {
-		const res = await fetch(`${API_BASE}/sessions/${sessionId}`, { headers: DEFAULT_HEADERS });
+		const res = await fetch(`${API_BASE}/sessions/${sessionId}`, { headers: getHeaders() });
 		const data = await res.json();
 		chatHistory.set(data);
 	} catch (err) {
@@ -95,7 +97,7 @@ export async function sendChatMessage(sessionId, message) {
 	try {
 		const res = await fetch(`${API_BASE}/chat/${sessionId}`, {
 			method: "POST",
-			headers: DEFAULT_HEADERS,
+			headers: getHeaders(),
 			body: JSON.stringify({ message }),
 			signal: ctrl.signal,
 		});
@@ -141,7 +143,7 @@ export async function toggleTask(task) {
 	try {
 		const res = await fetch(`${API_BASE}/tasks/${task.id}`, {
 			method: "PUT",
-			headers: DEFAULT_HEADERS,
+			headers: getHeaders(),
 			body: JSON.stringify({
 				...task,
 				is_completed: !task.is_completed,
@@ -157,7 +159,7 @@ export async function deleteTask(id) {
 	try {
 		const res = await fetch(`${API_BASE}/tasks/${id}`, {
 			method: "DELETE",
-			headers: DEFAULT_HEADERS,
+			headers: getHeaders(),
 		});
 		if (res.ok) fetchTasks();
 	} catch (err) {
@@ -169,7 +171,7 @@ export async function deleteSession(id) {
 	try {
 		const res = await fetch(`${API_BASE}/sessions/${id}`, {
 			method: "DELETE",
-			headers: DEFAULT_HEADERS,
+			headers: getHeaders(),
 		});
 		if (res.ok) {
 			await fetchSessions();

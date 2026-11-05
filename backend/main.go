@@ -50,33 +50,27 @@ type ChatMessage struct {
 var db *gorm.DB
 
 func getCurrentTime(c *gin.Context) time.Time {
-	//log.Printf("All request headers: %+v", c.Request.Header)
-
 	tz := c.GetHeader("X-Timezone")
-	//log.Printf("Timezone header: %q", tz)
-	if tz == "" {
-		now := time.Now().UTC()
-		log.Printf("No timezone header. Using UTC: %s", now.Format(time.RFC3339))
-		return now
+	clientTimeStr := c.GetHeader("X-Client-Time")
+
+	loc := time.UTC
+	if tz != "" {
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc = l
+		}
 	}
 
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		now := time.Now().UTC()
-		log.Printf("Invalid timezone %q. Falling back to UTC: %s", tz, now.Format(time.RFC3339))
-		return now
+	// If client passed their exact browser timestamp (ISO8601), prioritize it
+	if clientTimeStr != "" {
+		if clientTime, err := time.Parse(time.RFC3339, clientTimeStr); err == nil {
+			return clientTime.In(loc)
+		}
+		if clientTime, err := time.Parse("2006-01-02T15:04:05.000Z", clientTimeStr); err == nil {
+			return clientTime.In(loc)
+		}
 	}
 
-	now := time.Now().In(loc)
-
-	// log.Printf(
-	// 	"Server UTC: %s | Client TZ: %s | Converted: %s",
-	// 	time.Now().UTC().Format(time.RFC3339),
-	// 	tz,
-	// 	now.Format(time.RFC3339),
-	// )
-
-	return now
+	return time.Now().In(loc)
 }
 func initDB() {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -123,7 +117,7 @@ func main() {
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:4173", "http://127.0.0.1:5173", "http://127.0.0.1:4173", "https://calen-ai-cloud.vercel.app"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "X-Timezone"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "X-Timezone", "X-Client-Time"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
