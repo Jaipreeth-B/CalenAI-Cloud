@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -47,20 +50,87 @@ type ChatMessage struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-var db *gorm.DB
+var (
+	db            *gorm.DB
+	ipTimezoneMap sync.Map // cache for IP -> timezone string
+	ipHTTPClient  = &http.Client{Timeout: 2 * time.Second}
+)
 
-func getCurrentTime(c *gin.Context) time.Time {
-	tz := c.GetHeader("X-Timezone")
-	clientTimeStr := c.GetHeader("X-Client-Time")
+// getClientIP extracts the real public client IP from standard proxy headers or RemoteAddr
+func getClientIP(c *gin.Context) string {
+	for _, header := range []string{"X-Forwarded-For", "CF-Connecting-IP", "X-Real-IP"} {
+		if val := c.GetHeader(header); val != "" {
+			parts := strings.Split(val, ",")
+			ip := strings.TrimSpace(parts[0])
+			if parsed := net.ParseIP(ip); parsed != nil {
+				return ip
+			}
+		}
+	}
+	ip, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err == nil && net.ParseIP(ip) != nil {
+		return ip
+	}
+	return c.ClientIP()
+}
 
-	loc := time.UTC
-	if tz != "" {
-		if l, err := time.LoadLocation(tz); err == nil {
-			loc = l
+// getTimezoneFromIP geolocates the client IP and retrieves its IANA timezone
+func getTimezoneFromIP(ipStr string) string {
+	ip := net.ParseIP(ipStr)
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return ""
+	}
+
+	if val, ok := ipTimezoneMap.Load(ipStr); ok {
+		if tz, ok := val.(string); ok && tz != "" {
+			return tz
 		}
 	}
 
-	// If client passed their exact browser timestamp (ISO8601), prioritize it
+	// Query ip-api.com for IANA timezone
+	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,timezone", ipStr)
+	resp, err := ipHTTPClient.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		var result struct {
+			Status   string `json:"status"`
+			Timezone string `json:"timezone"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Status == "success" && result.Timezone != "" {
+			ipTimezoneMap.Store(ipStr, result.Timezone)
+			return result.Timezone
+		}
+	}
+	return ""
+}
+
+// resolveTimezone determines the client's timezone by checking IP geolocation first, then X-Timezone header, falling back to UTC
+func resolveTimezone(c *gin.Context) (string, *time.Location) {
+	clientIP := getClientIP(c)
+	if ipTZ := getTimezoneFromIP(clientIP); ipTZ != "" {
+		if loc, err := time.LoadLocation(ipTZ); err == nil {
+			return ipTZ, loc
+		}
+	}
+
+	if headerTZ := c.GetHeader("X-Timezone"); headerTZ != "" {
+		if loc, err := time.LoadLocation(headerTZ); err == nil {
+			return headerTZ, loc
+		}
+	}
+
+	return "UTC", time.UTC
+}
+
+func getCurrentTime(c *gin.Context) time.Time {
+	_, loc := resolveTimezone(c)
+	clientTimeStr := c.GetHeader("X-Client-Time")
+
+	// If client passed their exact browser timestamp (ISO8601), prioritize it in the resolved timezone
 	if clientTimeStr != "" {
 		if clientTime, err := time.Parse(time.RFC3339, clientTimeStr); err == nil {
 			return clientTime.In(loc)
@@ -228,10 +298,7 @@ func getTasks(c *gin.Context) {
 }
 
 func createTask(c *gin.Context) {
-	tz := c.GetHeader("X-Timezone")
-	if tz == "" {
-		tz = "UTC"
-	}
+	tz, _ := resolveTimezone(c)
 	var req TaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -286,10 +353,7 @@ func createTask(c *gin.Context) {
 }
 
 func updateTask(c *gin.Context) {
-	tz := c.GetHeader("X-Timezone")
-	if tz == "" {
-		tz = "UTC"
-	}
+	tz, _ := resolveTimezone(c)
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task id"})
@@ -600,10 +664,7 @@ func handleChat(c *gin.Context) {
 	}
 
 	// 2. Reasoning Loop (Multi-Think)
-	tz := c.GetHeader("X-Timezone")
-	if tz == "" {
-		tz = "UTC"
-	}
+	tz, _ := resolveTimezone(c)
 	response, err := callOpenRouterWithTools(messages, 0, tz, now)
 	if err != nil {
 		log.Printf("OpenRouter error: %v", err)
