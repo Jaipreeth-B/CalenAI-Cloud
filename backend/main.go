@@ -479,9 +479,10 @@ func getSessions(c *gin.Context) {
 }
 
 func createSession(c *gin.Context) {
+	now := getCurrentTime(c)
 	session := Session{
 		ID:    uuid.New().String(),
-		Title: "New Chat " + time.Now().Format("Jan 02, 15:04"),
+		Title: "New Chat " + now.Format("Jan 02, 15:04"),
 	}
 	if err := db.Create(&session).Error; err != nil {
 		log.Printf("createSession: %v", err)

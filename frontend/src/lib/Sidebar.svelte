@@ -5,6 +5,50 @@
 		createNewSession,
 		deleteSession,
 	} from "./api.js";
+	import { onMount, onDestroy } from "svelte";
+
+	let currentTimeStr = "";
+	let timer;
+
+	function updateCurrentTime() {
+		const now = new Date();
+		currentTimeStr = now.toLocaleTimeString([], {
+			hour: "2-digit",
+			minute: "2-digit",
+			second: "2-digit",
+			hour12: true,
+		});
+	}
+
+	onMount(() => {
+		updateCurrentTime();
+		timer = setInterval(updateCurrentTime, 1000);
+	});
+
+	onDestroy(() => {
+		if (timer) clearInterval(timer);
+	});
+
+	// Reformat session title to the user's local timezone if it's a default "New Chat" title
+	function formatSessionTitle(session) {
+		if (!session) return "";
+		if (session.created_at && (!session.title || session.title.startsWith("New Chat"))) {
+			const d = new Date(session.created_at);
+			if (!isNaN(d.getTime())) {
+				const datePart = d.toLocaleDateString([], {
+					month: "short",
+					day: "2-digit",
+				});
+				const timePart = d.toLocaleTimeString([], {
+					hour: "2-digit",
+					minute: "2-digit",
+					hour12: false,
+				});
+				return `New Chat ${datePart}, ${timePart}`;
+			}
+		}
+		return session.title;
+	}
 </script>
 
 <div class="flex flex-col h-full bg-gray-50 text-gray-900">
@@ -53,7 +97,7 @@
 					currentSessionId.set(session.id)}
 			>
 				<p class="text-[13px] truncate pr-6">
-					{session.title}
+					{formatSessionTitle(session)}
 				</p>
 
 				<button
@@ -94,9 +138,10 @@
 					Local User
 				</p>
 				<p
-					class="text-[10px] font-medium text-gray-500"
+					class="text-[11px] font-medium text-gray-500 flex items-center gap-1.5"
 				>
-					Connected
+					<span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+					<span>{currentTimeStr || "Connected"}</span>
 				</p>
 			</div>
 		</div>
